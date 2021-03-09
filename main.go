@@ -31,6 +31,7 @@ type config struct {
 const ASSETS_DIR = "./assets/"
 
 var metrics = make(map[string]metricDetails)
+var targets = make(map[string]bool)
 
 var appConfig config
 
@@ -53,7 +54,9 @@ func main() {
 	v1api := PromAPIV1.NewAPI(client)
 	prepareDate(v1api)
 
-	http.Handle("/", http.FileServer(http.Dir(ASSETS_DIR)))
+	http.HandleFunc("/", index)
+	http.HandleFunc("/targets", getTargets)
+	http.HandleFunc("/metrics", getMetrics)
 	log.Print(fmt.Sprint("App is running on port:", appConfig.SERVE_PORT))
 	err = http.ListenAndServe(fmt.Sprint(":", appConfig.SERVE_PORT), nil)
 	if err != nil {
@@ -75,8 +78,10 @@ func prepareDate(v1api PromAPIV1.API) {
 		resp, err := http.Get(target)
 		if err != nil {
 			log.Warn("Target: " + target + " is unreachable")
+			targets[target] = false
 			continue
 		}
+		targets[target] = true
 		defer resp.Body.Close()
 		body, err := ioutil.ReadAll(resp.Body)
 		r := strings.NewReader(string(body))
@@ -108,9 +113,117 @@ func prepareDate(v1api PromAPIV1.API) {
 			fmt.Fprintln(os.Stderr, "reading standard input:", err)
 		}
 	}
-	jsonString, err := json.MarshalIndent(metrics, "", "  ")
-	err = ioutil.WriteFile(ASSETS_DIR+".data", jsonString, 0644)
+}
+
+func getTargets(w http.ResponseWriter, r *http.Request) {
+	t, err := json.MarshalIndent(targets, "", "  ")
 	if err != nil {
-		log.Error(err)
+		log.Errorf("Panic: %s", err)
 	}
+	fmt.Fprintf(w, string(t))
+}
+
+func getMetrics(w http.ResponseWriter, r *http.Request) {
+	m, err := json.MarshalIndent(metrics, "", "  ")
+	if err != nil {
+		log.Errorf("Panic: %s", err)
+	}
+	fmt.Fprintf(w, string(m))
+}
+
+func index(w http.ResponseWriter, r *http.Request) {
+	str := `
+	<html lang="en"> 
+
+	<head> 
+		<meta charset="UTF-8"> 
+		<title>Prometheus Metrics Dictionary</title> 
+		<script src= "https://code.jquery.com/jquery-3.5.1.js"></script> 
+		<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta2/dist/js/bootstrap.bundle.min.js" integrity="sha384-b5kHyXgcpbZJO/tY9Ul7kGkf1S0CWuKcCD38l8YkeH8z8QjE0GmW1gYU5S9FOnJ0" crossorigin="anonymous"></script>
+		<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-BmbxuPwQa2lc/FVzBcNJ7UAyJxM6wuqIj61tLrc4wSX0szH/Ev+nYRRuWlolflfl" crossorigin="anonymous">
+	</head> 
+	
+	<body> 
+		<div class="container"> 
+			<h1 align="center">Prometheus Metrics Dictionary</h1> 
+			<div class="mb-3">
+				<label for="myInput" class="form-label">Search</label>
+				<input id="myInput"  type="text" class="form-control"  placeholder="search for metric">
+			</div>
+	
+			<div class="alert alert-info alert-dismissible fade show" role="alert">
+				<strong>Targets</strong>
+				<ul id="targets"></ul>
+				<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+			</div>
+			<!-- TABLE CONSTRUCTION-->
+			<table id='table' class="table table-striped table-hover"> 
+				<!-- HEADING FORMATION -->
+				<tr> 
+					<th>Name</th> 
+					<th>Type</th> 
+					<th>Description</th> 
+				</tr> 
+	
+				<script>
+					$(document).ready(function () { 
+						// Data Filter
+						$("#myInput").on("keyup", function() {
+							var value = $(this).val().toLowerCase();
+							$("#table tr").filter(function() {
+							$(this).toggle($(this).text().toLowerCase().indexOf(value) > -1)
+							});
+						});
+	
+						// load targets information
+						$.getJSON("/targets", 
+							function (data) { 
+								var targets = ''; 
+								// ITERATING THROUGH OBJECTS 
+								$.each(data, function (key, value) { 
+									console.log(key , value);
+									// //CONSTRUCTION OF ROWS HAVING 
+									// // DATA FROM JSON OBJECT 
+									var status = " (OK) "
+									if (value == false) {
+										var status = " (unreachable) "
+									} 
+	
+									targets += '<li>'; 
+									targets += key + status;   
+									targets += '</li>'; 
+							}); 
+								
+							//INSERTING ROWS INTO TABLE 
+							$('#targets').append(targets); 
+						}); 
+						
+						// FETCHING DATA FROM JSON FILE 
+						$.getJSON("/metrics", 
+								function (data) { 
+									var metrics = ''; 
+	
+									// ITERATING THROUGH OBJECTS 
+									$.each(data, function (key, value) { 
+										console.log(key , value)
+										// //CONSTRUCTION OF ROWS HAVING 
+										// // DATA FROM JSON OBJECT 
+										metrics += '<tr>'; 
+										metrics += '<td>' + key + '</td>'; 
+										metrics += '<td>' + value.Type + '</td>'; 
+										metrics += '<td>' + value.Description + '</td>'; 
+										metrics += '</tr>'; 
+									}); 
+									
+									//INSERTING ROWS INTO TABLE 
+									$('#table').append(metrics); 
+						}); 
+					}); 
+				</script> 
+		</div> 
+	</body> 
+	
+	</html> 
+	`
+	fmt.Fprintf(w, str)
 }
