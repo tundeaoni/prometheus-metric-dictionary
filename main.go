@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"embed"
 
 	log "github.com/sirupsen/logrus"
 
@@ -18,27 +21,30 @@ import (
 	PromAPIV1 "github.com/prometheus/client_golang/api/prometheus/v1"
 )
 
+// Prometheous metric type and description
 type metricDetails struct {
 	Type        string
 	Description string
 }
 
 type config struct {
-	SERVE_PORT     int    `envconfig:"SERVE_PORT" default:"8080""`
-	PROMETHEUS_URL string `envconfig:"PROMETHEUS_URL" required:"true""`
+	SERVE_PORT       int    `envconfig:"SERVE_PORT" default:"8080""`
+	REFRESH_INTERVAL int    `envconfig:"REFRESH_INTERVAL" default:"14400""`
+	PROMETHEUS_URL   string `envconfig:"PROMETHEUS_URL" required:"true""`
 }
-
-const ASSETS_DIR = "./assets/"
 
 var metrics = make(map[string]metricDetails)
 var targets = make(map[string]bool)
+
+//go:embed static
+var embededFiles embed.FS
 
 var appConfig config
 
 func init() {
 	err := envconfig.Process("", &appConfig)
 	if err != nil {
-		log.Fatal("application startup error", err)
+		log.Fatal("application startup error: \n", err)
 	}
 }
 
@@ -50,11 +56,35 @@ func main() {
 		fmt.Printf("Error creating client: %v\n", err)
 		os.Exit(1)
 	}
+	log.Debug(fmt.Sprint("Connecting to prometheus URL:", appConfig.PROMETHEUS_URL))
 
 	v1api := PromAPIV1.NewAPI(client)
-	prepareDate(v1api)
+	log.Debug("Extracting metrics with their descriptions.")
 
-	http.HandleFunc("/", index)
+	err = prepareDate(v1api)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ticker := time.NewTicker(time.Duration(appConfig.REFRESH_INTERVAL) * time.Second)
+	done := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				log.Info("Refreshing data.")
+				err = prepareDate(v1api)
+				if err != nil {
+					log.Error("Failed to update date ", err)
+				}
+			}
+		}
+	}()
+
+	http.Handle("/", http.FileServer(getFileSystem(false)))
 	http.HandleFunc("/targets", getTargets)
 	http.HandleFunc("/metrics", getMetrics)
 	log.Print(fmt.Sprint("App is running on port:", appConfig.SERVE_PORT))
@@ -64,13 +94,18 @@ func main() {
 	}
 }
 
-func prepareDate(v1api PromAPIV1.API) {
+// Queries prometheus for configured targets
+// pulls the metrics from each target
+// extracts type and description for each metric
+func prepareDate(v1api PromAPIV1.API) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	log.Info("Retrieving prometheus targets")
 	res, err := v1api.Targets(ctx)
 	if err != nil {
-		fmt.Printf("Error getting Targets from Prometheus: %v\n", err)
-		os.Exit(1)
+		log.Error("Error getting targets from Prometheus: %v\n", err)
+		return err
 	}
 
 	for _, v := range res.Active {
@@ -83,12 +118,19 @@ func prepareDate(v1api PromAPIV1.API) {
 		}
 		targets[target] = true
 		defer resp.Body.Close()
+
+		log.Info("Retrieving metrics details from ", target)
 		body, err := ioutil.ReadAll(resp.Body)
 		r := strings.NewReader(string(body))
 
+		// loop over each line
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
+			// select records which are comments
+			// format is typically
+			// # HELP metric_name metric_description.
+			// # TYPE metric_name metric_type
 			if strings.HasPrefix(line, "#") {
 				stringSlice := strings.Split(line, " ")
 				var m metricDetails
@@ -110,11 +152,14 @@ func prepareDate(v1api PromAPIV1.API) {
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			fmt.Fprintln(os.Stderr, "reading standard input:", err)
+			log.Error(os.Stderr, "reading standard input:", err)
+			return err
 		}
 	}
+	return nil
 }
 
+// Prints prometheous Targets as JSON string
 func getTargets(w http.ResponseWriter, r *http.Request) {
 	t, err := json.MarshalIndent(targets, "", "  ")
 	if err != nil {
@@ -123,6 +168,7 @@ func getTargets(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, string(t))
 }
 
+// Prints prometheus Metrics details as JSON string
 func getMetrics(w http.ResponseWriter, r *http.Request) {
 	m, err := json.MarshalIndent(metrics, "", "  ")
 	if err != nil {
@@ -131,99 +177,19 @@ func getMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, string(m))
 }
 
-func index(w http.ResponseWriter, r *http.Request) {
-	str := `
-	<html lang="en"> 
+// embeds filesystem with html file
+func getFileSystem(useOS bool) http.FileSystem {
+	f := "static"
+	if useOS {
+		log.Print("OS filesystem")
+		return http.FS(os.DirFS(f))
+	}
 
-	<head> 
-		<meta charset="UTF-8"> 
-		<title>Prometheus Metrics Dictionary</title> 
-		<script src= "https://code.jquery.com/jquery-3.5.1.js"></script> 
-		<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta2/dist/js/bootstrap.bundle.min.js" integrity="sha384-b5kHyXgcpbZJO/tY9Ul7kGkf1S0CWuKcCD38l8YkeH8z8QjE0GmW1gYU5S9FOnJ0" crossorigin="anonymous"></script>
-		<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-BmbxuPwQa2lc/FVzBcNJ7UAyJxM6wuqIj61tLrc4wSX0szH/Ev+nYRRuWlolflfl" crossorigin="anonymous">
-	</head> 
-	
-	<body> 
-		<div class="container"> 
-			<h1 align="center">Prometheus Metrics Dictionary</h1> 
-			<div class="mb-3">
-				<label for="myInput" class="form-label">Search</label>
-				<input id="myInput"  type="text" class="form-control"  placeholder="search for metric">
-			</div>
-	
-			<div class="alert alert-info alert-dismissible fade show" role="alert">
-				<strong>Targets</strong>
-				<ul id="targets"></ul>
-				<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-			</div>
-			<!-- TABLE CONSTRUCTION-->
-			<table id='table' class="table table-striped table-hover"> 
-				<!-- HEADING FORMATION -->
-				<tr> 
-					<th>Name</th> 
-					<th>Type</th> 
-					<th>Description</th> 
-				</tr> 
-	
-				<script>
-					$(document).ready(function () { 
-						// Data Filter
-						$("#myInput").on("keyup", function() {
-							var value = $(this).val().toLowerCase();
-							$("#table tr").filter(function() {
-							$(this).toggle($(this).text().toLowerCase().indexOf(value) > -1)
-							});
-						});
-	
-						// load targets information
-						$.getJSON("/targets", 
-							function (data) { 
-								var targets = ''; 
-								// ITERATING THROUGH OBJECTS 
-								$.each(data, function (key, value) { 
-									console.log(key , value);
-									// //CONSTRUCTION OF ROWS HAVING 
-									// // DATA FROM JSON OBJECT 
-									var status = " (OK) "
-									if (value == false) {
-										var status = " (unreachable) "
-									} 
-	
-									targets += '<li>'; 
-									targets += key + status;   
-									targets += '</li>'; 
-							}); 
-								
-							//INSERTING ROWS INTO TABLE 
-							$('#targets').append(targets); 
-						}); 
-						
-						// FETCHING DATA FROM JSON FILE 
-						$.getJSON("/metrics", 
-								function (data) { 
-									var metrics = ''; 
-	
-									// ITERATING THROUGH OBJECTS 
-									$.each(data, function (key, value) { 
-										console.log(key , value)
-										// //CONSTRUCTION OF ROWS HAVING 
-										// // DATA FROM JSON OBJECT 
-										metrics += '<tr>'; 
-										metrics += '<td>' + key + '</td>'; 
-										metrics += '<td>' + value.Type + '</td>'; 
-										metrics += '<td>' + value.Description + '</td>'; 
-										metrics += '</tr>'; 
-									}); 
-									
-									//INSERTING ROWS INTO TABLE 
-									$('#table').append(metrics); 
-						}); 
-					}); 
-				</script> 
-		</div> 
-	</body> 
-	
-	</html> 
-	`
-	fmt.Fprintf(w, str)
+	log.Print("using embed mode")
+	fsys, err := fs.Sub(embededFiles, f)
+	if err != nil {
+		panic(err)
+	}
+
+	return http.FS(fsys)
 }
