@@ -22,7 +22,7 @@ In both examples above the application would be available on the default port : 
 | PROMETHEUS_URL  |  URL to access prometheus |  required |
 | REFRESH_INTERVAL  |  Time interval to update metrics details | 14400  (seconds)  |
 | SERVE_PORT  |  Port to run application |  8080 |
-
+| EXCLUDE_METRIC_LIST  |  Comma seperated list of metrics to exclude |  "" |
 
 ##### Installation
 - Download a pre-compiled, [released version](https://github.com/tundeaoni/prometheus-metric-dictionary/releases).

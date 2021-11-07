@@ -28,13 +28,15 @@ type metricDetails struct {
 }
 
 type config struct {
-	SERVE_PORT       int    `envconfig:"SERVE_PORT" default:"8080""`
-	REFRESH_INTERVAL int    `envconfig:"REFRESH_INTERVAL" default:"14400""`
-	PROMETHEUS_URL   string `envconfig:"PROMETHEUS_URL" required:"true""`
+	SERVE_PORT          int    `envconfig:"SERVE_PORT" default:"8080""`
+	REFRESH_INTERVAL    int    `envconfig:"REFRESH_INTERVAL" default:"14400""`
+	PROMETHEUS_URL      string `envconfig:"PROMETHEUS_URL" required:"true""`
+	EXCLUDE_METRIC_LIST string `envconfig:"EXCLUDE_METRIC_LIST"`
 }
 
 var metrics = make(map[string]metricDetails)
 var targets = make(map[string]bool)
+var excludedMetrics = make(map[string]bool)
 
 //go:embed static
 var embededFiles embed.FS
@@ -43,6 +45,15 @@ var appConfig config
 
 func init() {
 	err := envconfig.Process("", &appConfig)
+
+	eml := strings.Split(appConfig.EXCLUDE_METRIC_LIST, ",")
+	if len(eml) > 0 {
+		log.Info(fmt.Sprint("Excluding the following metrics: ", appConfig.EXCLUDE_METRIC_LIST))
+	}
+	for _, v := range eml {
+		excludedMetrics[v] = true
+	}
+
 	if err != nil {
 		log.Fatal("application startup error: \n", err)
 	}
@@ -61,7 +72,7 @@ func main() {
 	v1api := PromAPIV1.NewAPI(client)
 	log.Debug("Extracting metrics with their descriptions.")
 
-	err = prepareDate(v1api)
+	err = prepareData(v1api)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -76,7 +87,7 @@ func main() {
 				return
 			case <-ticker.C:
 				log.Info("Refreshing data.")
-				err = prepareDate(v1api)
+				err = prepareData(v1api)
 				if err != nil {
 					log.Error("Failed to update date ", err)
 				}
@@ -97,7 +108,7 @@ func main() {
 // Queries prometheus for configured targets
 // pulls the metrics from each target
 // extracts type and description for each metric
-func prepareDate(v1api PromAPIV1.API) error {
+func prepareData(v1api PromAPIV1.API) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -135,6 +146,10 @@ func prepareDate(v1api PromAPIV1.API) error {
 				stringSlice := strings.Split(line, " ")
 				var m metricDetails
 				key, metric, value := stringSlice[1], stringSlice[2], stringSlice[3:]
+
+				if _, ok := excludedMetrics[metric]; ok {
+					continue
+				}
 
 				if _, ok := metrics[metric]; ok {
 					m = metrics[metric]
